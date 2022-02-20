@@ -171,6 +171,8 @@ class Neighbor:
             self.state = state['Full']
             print datetime.datetime.now().strftime('%H:%M:%S.%f') + ' Loading done, neighbor' + str(
                 self.neighborId) + ' is fully adjacent'
+            self.loading_done(interface)
+            interface.add_adjacency(self.neighborId)
             intf.hasFullAdjacencies = True
         else:
             self.state = state['Loading']
@@ -200,6 +202,8 @@ class ExStartState:
         while not self.stop:
             packet = packetManager.build_db_description_packet(0,False,interface,neighbor,ims, self.addrInfo[0])
             self.sender_socket.sendto(packet, self.addrInfo)
+            if self.stop:
+                break
             time.sleep(interface.rxmtInterval)
 
     def receive(self, packet, intf):
@@ -254,9 +258,12 @@ class ExChangeState():
         self.received_packet = 0
         ims = int(0b0011)
         self.ddSeq += 1
-        packet = packetManager.build_db_description_packet(self.ddSeq, False, interface, neighbor, ims, neighbor.neighborAddress)     # TODO packetManager.build_db_description_packet
+        packet = packetManager.build_db_description_packet(self.ddSeq, False, interface, neighbor, ims, neighbor.neighborAddress)
         while not self.acknowledged:
             self.sender_socket.sendto(packet, self.addrInfo)
+            time.sleep(0.05)
+            if self.acknowledged:
+                break
             time.sleep(interface.rxmtInterval)
         self.acknowledged = False
         self.ddSeq += 1
@@ -264,6 +271,9 @@ class ExChangeState():
         packet = packetManager.build_db_description_packet(self.ddSeq, True, interface, neighbor, ims, neighbor.neighborAddress)
         while not self.acknowledged:
             self.sender_socket.sendto(packet, self.addrInfo)
+            time.sleep(0.05)
+            if self.acknowledged:
+                break
             time.sleep(interface.rxmtInterval)
         self.acknowledged = False
         self.ddSeq += 1
@@ -276,38 +286,36 @@ class ExChangeState():
 
     def slave(self, interface, neighbor):
         lsdb = interface.ospfDb.lsdbs[interface.areaId]
-        ims = int(0b010)
-        packet = packetManager.build_db_description_packet(self.ddSeq, False, interface, neighbor, ims, neighbor.neighborAddress)
-        self.acknowledged = False
-        i = 0
         while True:
-            if self.acknowledged:
-                try:
-                    neighbor.dbDescriptionPacket.lsas.values()[0]
+            if self.received_packet is not None:
+                if self.received_packet.ims['I'] == '1':
+                    ims = int(0b010)
+                    packet = packetManager.build_db_description_packet(self.ddSeq, False, interface, neighbor, ims,
+                                                                       neighbor.neighborAddress)
+                    self.sender_socket.sendto(packet, self.addrInfo)
+                    self.received_packet = None
+                elif self.received_packet.ims['I'] == '0' and self.received_packet.ims['M'] == '1':
+                        ims = int(0b000)
+                        ddSeq = self.ddSeq
+                        packet = packetManager.build_db_description_packet(ddSeq, True, interface, neighbor, ims,
+                                                                           neighbor.neighborAddress)
+                        self.sender_socket.sendto(packet, self.addrInfo)
+                        if hasattr(self.received_packet, 'lsas'):
+                            packetManager.store_ls_requests(lsdb, self.received_packet)
+                        self.received_packet = None
+                else:
+                    ims = int(0b000)
+                    ddSeq = self.ddSeq
+                    packet = packetManager.build_db_description_packet(ddSeq, True, interface, neighbor, ims,
+                                                                       neighbor.neighborAddress)
+                    self.sender_socket.sendto(packet, self.addrInfo)
+                    self.received_packet = None
                     break
-                except:
-                    self.acknowledged = False
-            self.sender_socket.sendto(packet, self.addrInfo)
-            time.sleep(interface.rxmtInterval)
-        packet = self.received_packet
-        packetManager.store_ls_requests(lsdb, packet)  # stores requests to be made
-        self.ddSeq = packet.ddSequence
-        self.received_packet = 0
 
         if len(lsdb.lsRequests.keys()) > 0:
             neighbor.exchange_done(False, interface)
         else:
             neighbor.exchange_done(True, interface)
-
-        self.acknowledged = False
-        i = 0
-        ims = int(0b000)
-        while not self.acknowledged and i < 3:
-            ddSeq = neighbor.dbDescriptionPacket.ddSequence
-            packet = packetManager.build_db_description_packet(ddSeq, True, interface, neighbor, ims, neighbor.neighborAddress)
-            self.sender_socket.sendto(packet, self.addrInfo)
-            i += 1
-            time.sleep(5)
 
     def receive(self, packet):
         if self.master:
@@ -315,8 +323,7 @@ class ExChangeState():
                 self.acknowledged = True
                 self.received_packet = packet
         else:
-            if packet.ddSequence != self.ddSeq:
-                self.acknowledged = True
+                self.ddSeq = packet.ddSequence
                 self.received_packet = packet
 
 
@@ -336,10 +343,12 @@ class LoadingState():
         packet = packetManager.build_ls_request(interface, neighbor)
         while not self.acknowledged:
             self.sender_socket.sendto(packet, self.addrInfo)
+            time.sleep(0.05)
+            if self.acknowledged:
+                break
             time.sleep(interface.rxmtInterval)
         neighbor.loading_done(interface)
         interface.add_adjacency(neighbor.neighborId)
-        time.sleep(1)
 
     def acknowledge(self):
         self.acknowledged = True
